@@ -3,25 +3,22 @@
 #include <arpa/inet.h>
 #include <sys/epoll.h>
 #include <fcntl.h>
-#include <signal.h>
-#include <stdio.h>
 #include <unistd.h>
-#include <cstring>
-#include <assert.h>
-#include <iostream>
-#include <climits>
 #include <netdb.h>
-#include "http.h"
+#include <assert.h>
+#include <syslog.h>
+
+#include <cstdio>
+#include <cstring>
 #include <iostream>
 #include <string>
 #include <thread>
 #include <future>
-#include <chrono>
 #include <unordered_map>
-#include <set>
 #include <vector>
-#include <condition_variable>
-#include <mutex>
+#include <fstream>
+#include "http.h"
+
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
@@ -38,11 +35,38 @@ int i = 10086;
 std::unordered_map<FD, std::unordered_map<std::string, FD>> network_bridge;
 std::unordered_map<std::string, in_addr_t> dns;
 
+bool inBlackList(sockaddr_in& host_address){
+	std::ifstream in;
+	in.open("./blacklist.txt");
+	std::string list;
+	while(in >> list){
+		if(strcmp(inet_ntoa(host_address.sin_addr), list.c_str()) == 0){
+			in.close();
+			return true;
+		}
+	}
+	in.close();
+	return false;
+}
+
+bool inWhiteList(std::string server_address){
+	std::ifstream in("./whitelist.txt");
+	std::string list;
+	while(in >> list){
+		if(server_address.find(list) != std::string::npos){
+			in.close();
+			return true;
+		}
+	}
+	in.close();
+	return false;
+}
+
 
 FD create_local_socket(const char* address, int port){
     FD fd = socket(PF_INET, SOCK_STREAM, 0);
 	if(fd < 0){
-		printf("socket create error\n");
+		syslog(LOG_ERR | LOG_LOCAL0, "socket create error\n");
 		return -1;
 	}
 	int reuse = 1;
@@ -54,7 +78,7 @@ FD create_local_socket(const char* address, int port){
 	local_address.sin_port = htons(port);
 	int ret = bind(fd, (sockaddr*)&local_address, sizeof(local_address));
 	if(ret < 0){
-		printf("bind error\n");
+		syslog(LOG_ERR | LOG_LOCAL0, "Bind error\n");
 		close(fd);
 		return -1;
 	}
@@ -68,10 +92,15 @@ void accept_connection(FD proxy){
 	while(1){
 		int host = accept(proxy, (sockaddr*)&host_address, &length);
 		if(host < 0){
-			printf("accept error\n");
+			syslog(LOG_ERR | LOG_LOCAL0, "accept error\n");
 			continue;
 		}
-		printf("GET a socket\n");
+		if(inBlackList(host_address)){
+			close(host);
+			syslog(LOG_INFO | LOG_LOCAL0, "Throw a package\n");
+			continue;
+		}
+		syslog(LOG_INFO | LOG_LOCAL0, "Get a socket\n");
 		fcntl(host, F_SETFL, fcntl(host, F_GETFL) | O_NONBLOCK);
 		network_bridge[host];
 		std::thread th(func, host);
@@ -88,7 +117,7 @@ int create_connection(FD host, FD epollfd, char* origin, char* website, std::fut
 	event.data.fd = server;
 	if(server < 0){
 		get_fd.set_value(-1);
-		printf("socket create error\n");
+		syslog(LOG_ERR | LOG_LOCAL0, "Socket create error\n");
 		return -1;
 	}
 	sockaddr_in server_address;
@@ -101,7 +130,6 @@ int create_connection(FD host, FD epollfd, char* origin, char* website, std::fut
 		server_address.sin_addr.s_addr = dns[std::string(website)];
 	}
 	else{
-		//printf("website is : %s\n", website);
 		if(strchr(website, ':') != nullptr){
 			if(strstr(website, ":443") != nullptr){
 				*(strchr(website, ':')) = '\0';
@@ -120,17 +148,16 @@ int create_connection(FD host, FD epollfd, char* origin, char* website, std::fut
 				inet_pton(AF_INET, website, &server_address.sin_addr);
 				website += strlen(website) + 1;
 				server_address.sin_port = htons(atoi(website));
-				//printf("get a ip, port is %d\n", atoi(website));
 			}
 		}
 		else{
 			hostent* serverinfo = gethostbyname(website);
 			if(serverinfo->h_addrtype == AF_INET6){
 				get_fd.set_value(-1);
-				printf("IPV6 not allowed\n");
+				syslog(LOG_ERR | LOG_LOCAL0, "Get an IPV6 package\n");
 				return -1;
 			}
-			printf("DNS解析结果:%s\n", inet_ntoa(*(in_addr*)serverinfo->h_addr_list[0]));
+			//printf("DNS解析结果:%s\n", inet_ntoa(*(in_addr*)serverinfo->h_addr_list[0]));
 			//inet_pton(AF_INET, inet_ntop(AF_INET, host->h_addr_list[0],str, sizeof(str)), &server_address.sin_addr);
 			server_address.sin_addr.s_addr = inet_addr(inet_ntoa(*(in_addr*)serverinfo->h_addr_list[0]));
 			server_address.sin_port = htons(80);
@@ -144,7 +171,7 @@ int create_connection(FD host, FD epollfd, char* origin, char* website, std::fut
 	if(err < 0){
 		get_fd.set_value(-1);
 		network_bridge[host].erase(std::string{origin_website});
-		printf("connect error\n");
+		syslog(LOG_ERR | LOG_LOCAL0, "Connect error\n");
 		close(server);
 		return -1;
 	}
@@ -163,7 +190,7 @@ int create_connection(FD host, FD epollfd, char* origin, char* website, std::fut
 		temp = send(server, file, strlen(file), 0);
 		if(temp == -1){
 			if(errno != EINTR){
-				printf("send error\n");
+				syslog(LOG_ERR | LOG_LOCAL0, "Send error\n");
 				close(server);
 				return -1;
 			}
@@ -192,21 +219,24 @@ int create_connection(FD host, FD epollfd, char* origin, char* website, std::fut
 	return 0;
 }
 
-int main(){
+int main(int argc, char* argv[]){
 	int err;
+	openlog(argv[0], LOG_PID | LOG_ODELAY, LOG_USER);	//notice: add (signal_name.*  log_pos) to /etc/rsyslog.conf
+	setlogmask(LOG_DEBUG);
 	FD proxy = create_local_socket("0.0.0.0", 12345);
 	if(proxy < 0){
-		printf("quit\n");
+		syslog(LOG_ERR | LOG_LOCAL0, "Proxy create error\n");
 		return 0;
 	}
     err = listen(proxy, 8);
     if(err < 0){
-		printf("listen error\n");
+		syslog(LOG_ERR | LOG_LOCAL0, "Listen error\n");
 		close(proxy);
 		return 0;
 	}
 	accept_connection(proxy);
     close(proxy);
+	closelog();
     return 0;
 }
 
@@ -216,7 +246,7 @@ void epoll_func(FD epollfd, std::future<int>& isStop, std::promise<int>& command
 	while(1s > std::chrono::high_resolution_clock::now() - begin && isStop.wait_for(1us) == std::future_status::timeout){
 		int ret = epoll_wait(epollfd, events, MAX_SIZE, 1);
 		if(ret < 0){
-			printf("epoll_wait error\n");
+			syslog(LOG_ERR | LOG_LOCAL0, "Epoll wait error\n");
 			break;
 		}
 		else if(ret > 0){
@@ -260,14 +290,11 @@ void func(FD host){
 				if(errno == EAGAIN){
 					break;
 				}
-				else if(errno == 104){	//104 means Connection closed by peer
-					break;
-				}
-				else if(errno == 110){	//110 means Connection timed out
+				else if(errno == 104 || errno == 110){	//104 means Connection closed by peer
 					break;
 				}
 				else{
-					printf("other error, no is %d, buffer length %d\n", errno, length);
+					syslog(LOG_INFO | LOG_LOCAL0, "other error, no is %d, buffer length %d\n", errno, length);
 					break;
 				}	
 			}
@@ -279,19 +306,12 @@ void func(FD host){
 					continue;
 				}	
 			}
-			else if(errno == 104){	//104 means Connection closed by peer
-				break;
-			}
-			else if(errno == 110){	//110 means Connection timed out
-				break;
-			}
 			else{
-				printf("other error, no is %d", errno);
 				break;
-			}	
+			}
 		}
         if(data_read == 0){
-            printf("connection break\n");
+            syslog(LOG_INFO | LOG_LOCAL0, "Host close a conncet\n");
             break;
         }
         end += length;
@@ -301,12 +321,20 @@ void func(FD host){
 		++test;
         HTTP_CODE result = parse_context(buffer, origin, website, begin, end, checkstate, linepos);
         if(result == NO_REQUEST){
-            printf("A NO_REQUEST, context is:%s\n", origin);
+            syslog(LOG_WARNING | LOG_LOCAL0, "Get a NO_REQUEST, context is:%s\n", origin);
 			continue;
         }
         else if(result == GET_REQUEST){
             //send(remote, msg, strlen(msg), 0);
             //printf("msg send success\n");
+			if(!inWhiteList(std::string{website})){
+				delete[] buffer;
+				delete[] origin;
+				th.join();
+				close(epollfd);
+				close(host);
+				return;
+			}
 			if(network_bridge[host].find(std::string(website)) != network_bridge[host].end()){
 				//printf("A known location, context is\n%s\n", origin);
 				char* file = origin;
@@ -314,7 +342,7 @@ void func(FD host){
 					int temp1 = send(network_bridge[host][std::string(website)], file, strlen(file), 0);
 					if(temp1 == -1){
 						if(errno != EINTR){
-							printf("send1 error, reason is %d\n", errno);
+							syslog(LOG_ERR | LOG_LOCAL0, "Send to server by known host error, reason is %s\n", strerror(errno));
 						}
 						break;
 					}
@@ -340,7 +368,7 @@ void func(FD host){
             continue;
         }
         else{
-            printf("UNKNWON\n");
+            syslog(LOG_ERR | LOG_LOCAL0, "Package has a problem\n");
             break;
         }
     }
