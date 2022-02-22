@@ -55,7 +55,7 @@ private:
 class thread_pool{
 public:
     thread_pool() : done(false), joiner(threads){
-        const size_t thread_count = std::max(32u, std::thread::hardware_concurrency());
+        const size_t thread_count = 8;//std::max(32u, std::thread::hardware_concurrency());
         try{
             for(size_t i = 0; i < thread_count; ++i){
                 threads.push_back(std::thread(&thread_pool::work_thread, this));
