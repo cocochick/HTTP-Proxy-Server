@@ -18,6 +18,7 @@
 #include <vector>
 #include <fstream>
 #include "http.h"
+#include "thread_pool.h"
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -28,6 +29,7 @@ constexpr int BUFFER_SIZE = 10485760;
 constexpr int MAX_SIZE = 65535;
 using FD = int;
 using namespace std::chrono_literals;
+thread_pool th_pool;
 //static FD epollfd;
 
 void func(FD);
@@ -66,7 +68,7 @@ bool inWhiteList(std::string server_address){
 FD create_local_socket(const char* address, int port){
     FD fd = socket(PF_INET, SOCK_STREAM, 0);
 	if(fd < 0){
-		syslog(LOG_ERR | LOG_LOCAL0, "socket create error\n");
+		syslog(LOG_ERR, "socket create error\n");
 		return -1;
 	}
 	int reuse = 1;
@@ -78,7 +80,7 @@ FD create_local_socket(const char* address, int port){
 	local_address.sin_port = htons(port);
 	int ret = bind(fd, (sockaddr*)&local_address, sizeof(local_address));
 	if(ret < 0){
-		syslog(LOG_ERR | LOG_LOCAL0, "Bind error\n");
+		syslog(LOG_ERR, "Bind error\n");
 		close(fd);
 		return -1;
 	}
@@ -92,23 +94,25 @@ void accept_connection(FD proxy){
 	while(1){
 		int host = accept(proxy, (sockaddr*)&host_address, &length);
 		if(host < 0){
-			syslog(LOG_ERR | LOG_LOCAL0, "accept error\n");
+			syslog(LOG_ERR, "accept error\n");
 			continue;
 		}
 		if(inBlackList(host_address)){
 			close(host);
-			syslog(LOG_INFO | LOG_LOCAL0, "Throw a package\n");
+			syslog(LOG_INFO, "Throw a package\n");
 			continue;
 		}
-		syslog(LOG_INFO | LOG_LOCAL0, "Get a socket\n");
+		syslog(LOG_INFO, "Get a socket\n");
 		fcntl(host, F_SETFL, fcntl(host, F_GETFL) | O_NONBLOCK);
 		network_bridge[host];
-		std::thread th(func, host);
-		th.detach();
+		auto foo = std::bind(func, host);
+		th_pool.submit(foo);
+		//std::thread th(func, host);
+		//th.detach();
 	}
 }
 
-int create_connection(FD host, FD epollfd, char* origin, char* website, std::future<int> isStop, std::promise<int>& command, std::promise<FD>& get_fd){
+int create_connection(FD host, FD epollfd, char* origin, char* website, std::shared_future<int> isStop, std::promise<int>& command, std::promise<FD>& get_fd){
 	FD server = create_local_socket("0.0.0.0", i++);
 	char origin_website[1024];
 	strcpy(origin_website, website);
@@ -117,7 +121,7 @@ int create_connection(FD host, FD epollfd, char* origin, char* website, std::fut
 	event.data.fd = server;
 	if(server < 0){
 		get_fd.set_value(-1);
-		syslog(LOG_ERR | LOG_LOCAL0, "Socket create error\n");
+		syslog(LOG_ERR, "Socket create error\n");
 		return -1;
 	}
 	sockaddr_in server_address;
@@ -154,7 +158,7 @@ int create_connection(FD host, FD epollfd, char* origin, char* website, std::fut
 			hostent* serverinfo = gethostbyname(website);
 			if(serverinfo->h_addrtype == AF_INET6){
 				get_fd.set_value(-1);
-				syslog(LOG_ERR | LOG_LOCAL0, "Get an IPV6 package\n");
+				syslog(LOG_ERR, "Get an IPV6 package\n");
 				return -1;
 			}
 			//printf("DNS解析结果:%s\n", inet_ntoa(*(in_addr*)serverinfo->h_addr_list[0]));
@@ -171,7 +175,7 @@ int create_connection(FD host, FD epollfd, char* origin, char* website, std::fut
 	if(err < 0){
 		get_fd.set_value(-1);
 		network_bridge[host].erase(std::string{origin_website});
-		syslog(LOG_ERR | LOG_LOCAL0, "Connect error\n");
+		syslog(LOG_ERR, "Connect error\n");
 		close(server);
 		return -1;
 	}
@@ -190,7 +194,7 @@ int create_connection(FD host, FD epollfd, char* origin, char* website, std::fut
 		temp = send(server, file, strlen(file), 0);
 		if(temp == -1){
 			if(errno != EINTR){
-				syslog(LOG_ERR | LOG_LOCAL0, "Send error\n");
+				syslog(LOG_ERR, "Send error\n");
 				close(server);
 				return -1;
 			}
@@ -206,7 +210,7 @@ int create_connection(FD host, FD epollfd, char* origin, char* website, std::fut
 	}
 	char* buffer = new char[BUFFER_SIZE];
 	char* buffer1 =new char[BUFFER_SIZE];
-	while(isStop.valid() != false && isStop.wait_for(1us) == std::future_status::timeout){
+	while(isStop.valid() != false && isStop.wait_for(0s) == std::future_status::timeout){
 		ret = splice(server, NULL, pipefd[1], NULL, 32768, SPLICE_F_MORE | SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
 		//printf("errno is %s\n", strerror(errno));
 		//assert(ret != -1);
@@ -221,39 +225,40 @@ int create_connection(FD host, FD epollfd, char* origin, char* website, std::fut
 
 int main(int argc, char* argv[]){
 	int err;
-	openlog(argv[0], LOG_PID | LOG_ODELAY, LOG_USER);	//notice: add (signal_name.*  log_pos) to /etc/rsyslog.conf
-	setlogmask(LOG_DEBUG);
+	openlog(argv[0], LOG_PID | LOG_NDELAY, LOG_LOCAL0);	//notice: add (signal_name.*  log_pos) to /etc/rsyslog.conf
+	//closelog();
+	//setlogmask(LOG_DEBUG);
+	syslog(LOG_DEBUG, "test log1\n");
 	FD proxy = create_local_socket("0.0.0.0", 12345);
 	if(proxy < 0){
-		syslog(LOG_ERR | LOG_LOCAL0, "Proxy create error\n");
+		syslog(LOG_ERR, "Proxy create error\n");
 		return 0;
 	}
     err = listen(proxy, 8);
     if(err < 0){
-		syslog(LOG_ERR | LOG_LOCAL0, "Listen error\n");
+		syslog(LOG_ERR, "Listen error\n");
 		close(proxy);
 		return 0;
 	}
 	accept_connection(proxy);
     close(proxy);
-	closelog();
     return 0;
 }
 
 void epoll_func(FD epollfd, std::future<int>& isStop, std::promise<int>& command){
 	epoll_event events[MAX_SIZE];
 	auto begin = std::chrono::high_resolution_clock::now();
-	while(1s > std::chrono::high_resolution_clock::now() - begin && isStop.wait_for(1us) == std::future_status::timeout){
+	while(1s > std::chrono::high_resolution_clock::now() - begin && isStop.wait_for(0s) == std::future_status::timeout){
 		int ret = epoll_wait(epollfd, events, MAX_SIZE, 1);
 		if(ret < 0){
-			syslog(LOG_ERR | LOG_LOCAL0, "Epoll wait error\n");
+			syslog(LOG_ERR, "Epoll wait error\n");
 			break;
 		}
 		else if(ret > 0){
 			begin = std::chrono::high_resolution_clock::now();
 		}
 	}
-	if(isStop.valid()){
+	if(isStop.wait_for(0s) == std::future_status::timeout){
 		command.set_value(1);
 	}
 	return;
@@ -274,10 +279,12 @@ void func(FD host){
 	event.events = EPOLLRDHUP | EPOLLET | EPOLLIN | EPOLLOUT;
 	event.data.fd = host;
 	epoll_ctl(epollfd, EPOLL_CTL_ADD, host, &event);
-	std::thread th(epoll_func, epollfd, ref(isStop), ref(flag));
+	auto foo1 = std::bind(epoll_func, epollfd, std::ref(isStop), std::ref(flag));
+	auto fin = th_pool.submit(foo1);
+	//std::thread th(epoll_func, epollfd, ref(isStop), ref(flag));
 	char* origin = new char[BUFFER_SIZE];
 	int test = 0;
-    while(isStop.wait_for(1us) == std::future_status::timeout){
+    while(isStop.wait_for(0s) == std::future_status::timeout){
         CHECK_STATE checkstate = CHECK_STATE_REQUESTLINE;
 		int data_read = 0;
 		int begin = 0;
@@ -294,7 +301,7 @@ void func(FD host){
 					break;
 				}
 				else{
-					syslog(LOG_INFO | LOG_LOCAL0, "other error, no is %d, buffer length %d\n", errno, length);
+					syslog(LOG_INFO, "other error, no is %d, buffer length %d\n", errno, length);
 					break;
 				}	
 			}
@@ -311,7 +318,7 @@ void func(FD host){
 			}
 		}
         if(data_read == 0){
-            syslog(LOG_INFO | LOG_LOCAL0, "Host close a conncet\n");
+            syslog(LOG_INFO, "Host close a conncet\n");
             break;
         }
         end += length;
@@ -321,7 +328,7 @@ void func(FD host){
 		++test;
         HTTP_CODE result = parse_context(buffer, origin, website, begin, end, checkstate, linepos);
         if(result == NO_REQUEST){
-            syslog(LOG_WARNING | LOG_LOCAL0, "Get a NO_REQUEST, context is:%s\n", origin);
+            syslog(LOG_WARNING, "Get a NO_REQUEST, context is:%s\n", origin);
 			continue;
         }
         else if(result == GET_REQUEST){
@@ -330,7 +337,8 @@ void func(FD host){
 			if(!inWhiteList(std::string{website})){
 				delete[] buffer;
 				delete[] origin;
-				th.join();
+				fin.get();
+				//th.join();
 				close(epollfd);
 				close(host);
 				return;
@@ -342,7 +350,7 @@ void func(FD host){
 					int temp1 = send(network_bridge[host][std::string(website)], file, strlen(file), 0);
 					if(temp1 == -1){
 						if(errno != EINTR){
-							syslog(LOG_ERR | LOG_LOCAL0, "Send to server by known host error, reason is %s\n", strerror(errno));
+							syslog(LOG_ERR, "Send to server by known host error, reason is %s\n", strerror(errno));
 						}
 						break;
 					}
@@ -354,10 +362,12 @@ void func(FD host){
 			}
 			else{
 				std::promise<int> message;
-				std::future<int> isStop = message.get_future();
+				std::shared_future<int> isStop = message.get_future();
 				std::promise<FD> server_fd;
 				std::future<FD> get_server_fd = server_fd.get_future();
-				std::future<int> res = std::async(std::launch::async, create_connection, host, epollfd, origin, website, std::move(isStop), ref(flag), ref(server_fd));
+				auto foo2 = std::bind(create_connection, host, epollfd, origin, website, isStop, std::ref(flag), std::ref(server_fd));
+				std::future<int> res = th_pool.submit(foo2);
+				//std::future<int> res = std::async(std::launch::async, create_connection, host, epollfd, origin, website, std::move(isStop), ref(flag), ref(server_fd));
 				FD server = get_server_fd.get();
 				thread_box.push_back(std::move(res));
 				message_box.push_back(std::move(message));
@@ -368,19 +378,20 @@ void func(FD host){
             continue;
         }
         else{
-            syslog(LOG_ERR | LOG_LOCAL0, "Package has a problem\n");
+            syslog(LOG_ERR, "Package has a problem\n");
             break;
         }
     }
 	for(int i = 0; i < thread_box.size(); ++i){
-		if(thread_box[i].wait_for(1us) == std::future_status::timeout){
+		if(thread_box[i].wait_for(0s) == std::future_status::timeout){
 			message_box[i].set_value(1);
 			thread_box[i].get();
 		}
 	}
 	delete[] buffer;
 	delete[] origin;
-	th.join();
+	//th.join();
+	fin.get();
 	close(epollfd);
 	close(host);
 }
