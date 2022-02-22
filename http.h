@@ -95,6 +95,9 @@ HTTP_CODE parse_header(char* buffer, char* package, char* website, CHECK_STATE& 
         strcpy(website, buffer);
         printf("HOST:%s\n", buffer);
     }
+    else if(strncasecmp(buffer, "Proxy-Connection:", 17) == 0){
+        return NO_REQUEST;
+    }
     else{
         strcat(package, buffer);
         //printf( "I can not handle this header\n" );
