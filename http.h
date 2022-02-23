@@ -1,3 +1,4 @@
+#pragma once
 #include <cstdio>
 #include <cstring>
 //LINE_OK表示读取到一个完整的行，LINE_BAD 行错误，LINE_OPEN 行数据不完整。
@@ -107,9 +108,11 @@ HTTP_CODE parse_header(char* buffer, char* package, char* website, CHECK_STATE& 
     return NO_REQUEST;
 }
 
-HTTP_CODE parse_context(char* buffer, char* package, char* website, int& begin, int& end, CHECK_STATE& checkstate, int& linepos){
+HTTP_CODE parse_context(char* buffer, char* package, char* website){
+    CHECK_STATE checkstate = CHECK_STATE_REQUESTLINE;
     LINE_STATUS linestatus = LINE_OK;
     HTTP_CODE retcode = NO_REQUEST;
+    int begin = 0, end = strlen(buffer), linepos = 0;
     while((linestatus = parse_line(buffer, begin, end)) == LINE_OK){
         char* temp = buffer + linepos;
         linepos = begin;
