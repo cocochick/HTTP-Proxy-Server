@@ -22,7 +22,7 @@
 #include "thread_pool.h"
 
 constexpr int MAX_SIZE = 64;
-constexpr int BUFFER_SIZE = 512;
+constexpr int BUFFER_SIZE = 4096;
 
 extern thread_pool th_pool;
 
@@ -35,7 +35,7 @@ public:
     static FD create_local_socket(const char* address, int port);
 private:
     static bool inWhiteList(std::string server_address);
-    static int exchange_key(FD hostfd, FD serverfd, int* pipefd);
+    //static int exchange_key(FD hostfd, FD serverfd, int* pipefd);
 };
 
 
@@ -51,12 +51,12 @@ void Proxy::recv_header(FD hostfd){
         syslog(LOG_WARNING, "Get a NO_REQUEST, context is:%s\n", origin_package);
 		return;
     }
-    /*
+    
     if(!inWhiteList(std::string{website})){
         close(hostfd);
         return;
     }
-    */
+    
     connect_to_server(hostfd, origin_package, website);
     close(hostfd);
 }
@@ -246,7 +246,7 @@ Proxy::FD Proxy::create_local_socket(const char* address, int port){
 	}
 	return fd;
 }
-
+/*
 int Proxy::exchange_key(FD hostfd, FD serverfd, int* pipefd){
     int ret;
     ret = splice(hostfd, NULL, pipefd[1], NULL, 32768, SPLICE_F_MORE | SPLICE_F_MOVE);
@@ -288,4 +288,4 @@ int Proxy::exchange_key(FD hostfd, FD serverfd, int* pipefd){
         }
     }
     return 0;
-}
+}*/
